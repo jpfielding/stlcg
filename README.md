@@ -35,7 +35,7 @@ phi := stlcg.Always(
         stlcg.Gt(x, stlcg.Const(5.0)),
         stlcg.Not(stlcg.Lt(y, stlcg.Const(2.0))),
     ),
-    stlcg.Interval(0, 50),
+    stlcg.Bounds(0, 50),
 )
 
 be := backends.MustNew()
