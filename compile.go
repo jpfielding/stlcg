@@ -3,6 +3,7 @@ package stlcg
 import (
 	"fmt"
 
+	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/jpfielding/stlcg/minmax"
@@ -70,8 +71,12 @@ func (c *compiler) compileFormula(f Formula) *graph.Node {
 		return c.reducePair(c.compileFormula(n.left), c.compileFormula(n.right), false)
 	case *orFormula:
 		return c.reducePair(c.compileFormula(n.left), c.compileFormula(n.right), true)
-	case *alwaysFormula, *eventuallyFormula, *untilFormula, *thenFormula, *integralFormula:
-		panic("stlcg: temporal operators not yet implemented (Phase D/E)")
+	case *alwaysFormula:
+		return c.slidingReduce(c.compileFormula(n.sub), n.interval, false)
+	case *eventuallyFormula:
+		return c.slidingReduce(c.compileFormula(n.sub), n.interval, true)
+	case *untilFormula, *thenFormula, *integralFormula:
+		panic("stlcg: Until/Then/Integral1d not yet implemented (Phase E)")
 	}
 	panic(fmt.Sprintf("stlcg: unknown formula type %T", f))
 }
@@ -131,6 +136,85 @@ func (c *compiler) reducePair(a, b *graph.Node, wantMax bool) *graph.Node {
 	}
 	return minmax.Minish(stacked, stackAxis, c.tau, mode, tie, false)
 }
+
+// slidingReduce computes a forward-time windowed min/max along the time
+// axis (axis 1) of sub ([B, T, 1]). For bounded Interval [a, b], the
+// output at time t is the reduction over sub[t+a : t+b+1] (inclusive
+// upper index), clipped to the trace end. For unbounded [a, ∞) the
+// window at time t is [t+a, T-1]. Truncated / empty windows are padded
+// with a sentinel (+∞ for min, -∞ for max) that does not affect the
+// reduction.
+//
+// Implementation is reshape-and-reduce: right-pad sub by L-1 sentinel
+// values, build L time-shifted slices at offsets a..a+L-1, stack them
+// into a new axis, and reduce with Maxish/Minish. O(L) graph size.
+func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *graph.Node {
+	shape := sub.Shape()
+	if shape.Rank() < 2 {
+		panic(fmt.Sprintf("stlcg: slidingReduce expects rank>=2 input, got %d", shape.Rank()))
+	}
+	T := shape.Dimensions[1]
+	if iv.Lo >= T {
+		panic(fmt.Sprintf("stlcg: interval lower bound %d >= trace length %d", iv.Lo, T))
+	}
+
+	a := iv.Lo
+	var b int
+	if iv.IsUnbounded() {
+		b = T - 1
+	} else {
+		b = iv.Hi
+		if b >= T {
+			b = T - 1
+		}
+	}
+	L := b - a + 1
+	if L < 1 {
+		panic(fmt.Sprintf("stlcg: empty interval after clipping: lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
+	}
+
+	g := sub.Graph()
+
+	// Right-pad along the time axis with sentinel so later slices never
+	// read past the original data. Need enough padding so sub[a+k : a+k+T]
+	// is valid for all k in [0, L-1] -> need end >= a + L - 1 + T.
+	padEnd := a + L - 1
+	rank := shape.Rank()
+	padAxes := make([]backends.PadAxis, rank)
+	padAxes[1] = backends.PadAxis{Start: 0, End: padEnd, Interior: 0}
+
+	sign := +1
+	if wantMax {
+		sign = -1 // sentinel = -∞ for max
+	}
+	fill := graph.Infinity(g, shape.DType, sign)
+	padded := graph.Pad(sub, fill, padAxes...)
+
+	// Build L time-shifted slices along axis 1.
+	slices := make([]*graph.Node, 0, L)
+	for k := 0; k < L; k++ {
+		axesSpec := make([]graph.SliceAxisSpec, rank)
+		for ax := 0; ax < rank; ax++ {
+			axesSpec[ax] = graph.AxisRange()
+		}
+		axesSpec[1] = graph.AxisRange(a+k, a+k+T)
+		slices = append(slices, graph.Slice(padded, axesSpec...))
+	}
+
+	// Stack along a new last axis: shape [..., T, F, L]. Reduce with
+	// keepDim=false so we collapse back to [..., T, F].
+	stackAxis := rank
+	stacked := graph.Stack(slices, stackAxis)
+
+	mode, tie := c.minmaxMode()
+	if wantMax {
+		return minmax.Maxish(stacked, stackAxis, c.tau, mode, tie, false)
+	}
+	return minmax.Minish(stacked, stackAxis, c.tau, mode, tie, false)
+}
+
+// ensure dtypes import is used even if the compiler grows or shrinks.
+var _ = dtypes.Float32
 
 func (c *compiler) minmaxMode() (minmax.Mode, minmax.TiePolicy) {
 	var mode minmax.Mode

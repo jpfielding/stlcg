@@ -56,8 +56,112 @@ func (r *referenceEvaluator) rho(f Formula, signals map[string][]float64) []floa
 		l := r.rho(n.left, signals)
 		rr := r.rho(n.right, signals)
 		return r.reducePair(l, rr, true)
+	case *alwaysFormula:
+		return r.slidingReduce(r.rho(n.sub, signals), n.interval, false)
+	case *eventuallyFormula:
+		return r.slidingReduce(r.rho(n.sub, signals), n.interval, true)
 	}
 	panic(fmt.Sprintf("ref: unsupported formula %T", f))
+}
+
+// slidingReduce is the reference-evaluator counterpart of
+// compiler.slidingReduce. At time t, the window is
+// [t+a, min(t+b, T-1)]. If empty (t+a >= T) the sentinel value
+// (+∞ for min, -∞ for max) is used — matching the compiler.
+func (r *referenceEvaluator) slidingReduce(sub []float64, iv Interval, wantMax bool) []float64 {
+	T := len(sub)
+	a := iv.Lo
+	var b int
+	if iv.IsUnbounded() {
+		b = T - 1
+	} else {
+		b = iv.Hi
+	}
+	sentinel := math.Inf(+1)
+	if wantMax {
+		sentinel = math.Inf(-1)
+	}
+
+	out := make([]float64, T)
+	for t := 0; t < T; t++ {
+		lo := t + a
+		hi := t + b
+		if hi > T-1 {
+			hi = T - 1
+		}
+		// Collect window values with sentinel padding so the window length
+		// is constant across t (matches compiler's padded reshape-and-reduce).
+		L := b - a + 1
+		win := make([]float64, L)
+		for k := 0; k < L; k++ {
+			idx := lo + k
+			if idx > T-1 {
+				win[k] = sentinel
+			} else {
+				win[k] = sub[idx]
+			}
+		}
+		out[t] = r.reduceWindow(win, wantMax)
+	}
+	return out
+}
+
+// reduceWindow reduces a fixed-length window according to mode/wantMax.
+func (r *referenceEvaluator) reduceWindow(win []float64, wantMax bool) float64 {
+	switch r.mode {
+	case ModeExact:
+		v := win[0]
+		for _, x := range win[1:] {
+			if wantMax {
+				if x > v {
+					v = x
+				}
+			} else {
+				if x < v {
+					v = x
+				}
+			}
+		}
+		return v
+	case ModeSmooth:
+		return smoothExtremumN(win, r.scale, wantMax)
+	}
+	panic("ref: unknown mode")
+}
+
+// smoothExtremumN is the n-way scalar smooth extremum.
+func smoothExtremumN(xs []float64, tau float64, wantMax bool) float64 {
+	signed := make([]float64, len(xs))
+	for i, x := range xs {
+		if wantMax {
+			signed[i] = tau * x
+		} else {
+			signed[i] = -tau * x
+		}
+	}
+	m := math.Inf(-1)
+	for _, v := range signed {
+		if v > m {
+			m = v
+		}
+	}
+	// Handle all-(-inf) case: result is -inf (i.e. sentinel dominated).
+	if math.IsInf(m, -1) {
+		if wantMax {
+			return math.Inf(-1)
+		}
+		return math.Inf(+1)
+	}
+	var sum float64
+	for _, v := range signed {
+		sum += math.Exp(v - m)
+	}
+	lse := m + math.Log(sum)
+	out := lse / tau
+	if !wantMax {
+		out = -out
+	}
+	return out
 }
 
 func (r *referenceEvaluator) rhoPredicate(p *predicate, signals map[string][]float64, T int) []float64 {
