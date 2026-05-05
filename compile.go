@@ -3,7 +3,6 @@ package stlcg
 import (
 	"fmt"
 
-	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/jpfielding/stlcg/minmax"
@@ -141,6 +140,48 @@ func (c *compiler) reducePair(a, b *graph.Node, wantMax bool) *graph.Node {
 	return minmax.Minish(stacked, stackAxis, c.tau, mode, tie, false)
 }
 
+// padTimeAxis right-pads sub along axis 1 by padEnd values of the given
+// sentinel fill. Unlike graph.Pad (no VJP in gomlx), this uses
+// Concatenate with a StopGradient'd broadcast tensor so autodiff can flow
+// through the rest of the trace unimpeded.
+func padTimeAxisRight(sub, fill *graph.Node, padEnd int) *graph.Node {
+	if padEnd <= 0 {
+		return sub
+	}
+	shape := sub.Shape()
+	rank := shape.Rank()
+	padDims := make([]int, rank)
+	for i := 0; i < rank; i++ {
+		padDims[i] = shape.Dimensions[i]
+	}
+	padDims[1] = padEnd
+
+	padShape := shape
+	padShape.Dimensions = padDims
+	sentinel := graph.StopGradient(graph.BroadcastToShape(fill, padShape))
+	return graph.Concatenate([]*graph.Node{sub, sentinel}, 1)
+}
+
+// padTimeAxisLeft prepends padStart values of fill along axis 1, via
+// Concatenate. Same VJP-safe reason as padTimeAxisRight.
+func padTimeAxisLeft(sub, fill *graph.Node, padStart int) *graph.Node {
+	if padStart <= 0 {
+		return sub
+	}
+	shape := sub.Shape()
+	rank := shape.Rank()
+	padDims := make([]int, rank)
+	for i := 0; i < rank; i++ {
+		padDims[i] = shape.Dimensions[i]
+	}
+	padDims[1] = padStart
+
+	padShape := shape
+	padShape.Dimensions = padDims
+	sentinel := graph.StopGradient(graph.BroadcastToShape(fill, padShape))
+	return graph.Concatenate([]*graph.Node{sentinel, sub}, 1)
+}
+
 // slidingReduce computes a forward-time windowed min/max along the time
 // axis (axis 1) of sub ([B, T, 1]). For bounded Interval [a, b], the
 // output at time t is the reduction over sub[t+a : t+b+1] (inclusive
@@ -150,8 +191,9 @@ func (c *compiler) reducePair(a, b *graph.Node, wantMax bool) *graph.Node {
 // reduction.
 //
 // Implementation is reshape-and-reduce: right-pad sub by L-1 sentinel
-// values, build L time-shifted slices at offsets a..a+L-1, stack them
-// into a new axis, and reduce with Maxish/Minish. O(L) graph size.
+// values (via VJP-safe Concatenate+StopGradient), build L time-shifted
+// slices at offsets a..a+L-1, stack them into a new axis, and reduce
+// with Maxish/Minish. O(L) graph size.
 func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *graph.Node {
 	shape := sub.Shape()
 	if shape.Rank() < 2 {
@@ -178,21 +220,16 @@ func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *gr
 	}
 
 	g := sub.Graph()
-
-	// Right-pad along the time axis with sentinel so later slices never
-	// read past the original data. Need enough padding so sub[a+k : a+k+T]
-	// is valid for all k in [0, L-1] -> need end >= a + L - 1 + T.
-	padEnd := a + L - 1
 	rank := shape.Rank()
-	padAxes := make([]backends.PadAxis, rank)
-	padAxes[1] = backends.PadAxis{Start: 0, End: padEnd, Interior: 0}
 
 	sign := +1
 	if wantMax {
 		sign = -1 // sentinel = -∞ for max
 	}
 	fill := graph.Infinity(g, shape.DType, sign)
-	padded := graph.Pad(sub, fill, padAxes...)
+
+	padEnd := a + L - 1
+	padded := padTimeAxisRight(sub, fill, padEnd)
 
 	// Build L time-shifted slices along axis 1.
 	slices := make([]*graph.Node, 0, L)
@@ -264,11 +301,10 @@ func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, p
 
 	// Pad psi on the right with -∞ sentinel so slicing out-of-range s is
 	// ignored by the outer max. The phi prefixes are already handled by
-	// slidingReduce's internal sentinel padding.
+	// slidingReduce's internal sentinel padding. VJP-safe pad path.
 	rank := shape.Rank()
-	padAxes := make([]backends.PadAxis, rank)
-	padAxes[1] = backends.PadAxis{Start: 0, End: a + L - 1}
-	psiPad := graph.Pad(psi, graph.Infinity(phi.Graph(), shape.DType, -1), padAxes...)
+	psiFill := graph.Infinity(phi.Graph(), shape.DType, -1)
+	psiPad := padTimeAxisRight(psi, psiFill, a+L-1)
 
 	inner := make([]*graph.Node, L)
 	for k := 0; k < L; k++ {
@@ -315,21 +351,13 @@ func (c *compiler) compileIntegral(f *integralFormula) *graph.Node {
 	rank := shape.Rank()
 	g := sub.Graph()
 
-	// Pad right with 0 so cumulative differences past the trace end
-	// contribute nothing.
+	// Reshape-and-reduce integral: right-pad by L-1 zeros (so slices
+	// past the trace end contribute 0), build L shifted slices at
+	// offsets a..a+L-1, stack, and ReduceSum along the stack axis.
+	// ReduceSum has a VJP in gomlx; CumSum/SumPool does not.
 	zero := graph.Scalar(g, shape.DType, 0)
-	padAxes := make([]backends.PadAxis, rank)
-	padAxes[1] = backends.PadAxis{Start: 0, End: a + L - 1}
-	padded := graph.Pad(sub, zero, padAxes...)
+	padded := padTimeAxisRight(sub, zero, a+L-1)
 
-	// Prepend a single zero along the time axis so cum[t] now represents
-	// sum over indices strictly < t, letting us take cum[t+b+1] - cum[t+a]
-	// for an inclusive window [t+a, t+b].
-	leftOne := make([]backends.PadAxis, rank)
-	leftOne[1] = backends.PadAxis{Start: 1, End: 0}
-	cum := graph.CumSum(graph.Pad(padded, zero, leftOne...), 1)
-
-	// Slice at t+a and t+b+1 across t ∈ [0, T-1].
 	rangeSpec := func(start, end int) []graph.SliceAxisSpec {
 		s := make([]graph.SliceAxisSpec, rank)
 		for ax := 0; ax < rank; ax++ {
@@ -338,15 +366,19 @@ func (c *compiler) compileIntegral(f *integralFormula) *graph.Node {
 		s[1] = graph.AxisRange(start, end)
 		return s
 	}
-	hi := graph.Slice(cum, rangeSpec(a+L, a+L+T)...)
-	lo := graph.Slice(cum, rangeSpec(a, a+T)...)
-	integral := graph.Sub(hi, lo)
+
+	slices := make([]*graph.Node, 0, L)
+	for k := 0; k < L; k++ {
+		slices = append(slices, graph.Slice(padded, rangeSpec(a+k, a+k+T)...))
+	}
+	stackAxis := rank
+	stacked := graph.Stack(slices, stackAxis)
+	integral := graph.ReduceSum(stacked, stackAxis)
 
 	if f.scheme == Trapezoid {
 		// Subtract half of the two endpoints: 0.5 * (sub[t+a] + sub[t+b]).
-		endsPad := graph.Pad(sub, zero, padAxes...)
-		lowEnd := graph.Slice(endsPad, rangeSpec(a, a+T)...)
-		highEnd := graph.Slice(endsPad, rangeSpec(b, b+T)...)
+		lowEnd := graph.Slice(padded, rangeSpec(a, a+T)...)
+		highEnd := graph.Slice(padded, rangeSpec(b, b+T)...)
 		half := graph.Scalar(g, shape.DType, 0.5)
 		adjust := graph.Mul(graph.Add(lowEnd, highEnd), half)
 		integral = graph.Sub(integral, adjust)
