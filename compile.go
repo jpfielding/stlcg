@@ -75,8 +75,12 @@ func (c *compiler) compileFormula(f Formula) *graph.Node {
 		return c.slidingReduce(c.compileFormula(n.sub), n.interval, false)
 	case *eventuallyFormula:
 		return c.slidingReduce(c.compileFormula(n.sub), n.interval, true)
-	case *untilFormula, *thenFormula, *integralFormula:
-		panic("stlcg: Until/Then/Integral1d not yet implemented (Phase E)")
+	case *untilFormula:
+		return c.compileUntilThen(n.left, n.right, n.interval, n.overlap, false)
+	case *thenFormula:
+		return c.compileUntilThen(n.left, n.right, n.interval, n.overlap, true)
+	case *integralFormula:
+		return c.compileIntegral(n)
 	}
 	panic(fmt.Sprintf("stlcg: unknown formula type %T", f))
 }
@@ -211,6 +215,144 @@ func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *gr
 		return minmax.Maxish(stacked, stackAxis, c.tau, mode, tie, false)
 	}
 	return minmax.Minish(stacked, stackAxis, c.tau, mode, tie, false)
+}
+
+// compileUntilThen lowers (phi U_iv psi) or (phi T_iv psi) into a
+// [B, T, 1] robustness-trace node.
+//
+// Semantics (forward time; conventional STL, overlap=true):
+//
+//	until[t] = max_{s ∈ [t+a, t+b] ∩ [0, T-1]}
+//	               min( prefix_{t..s} phi,   psi[s] )
+//
+// For Until, prefix_{t..s} phi = min over u ∈ [t, s] of phi[u].
+// For Then,  prefix_{t..s} phi = max over u ∈ [t, s] of phi[u].
+//
+// Implementation: for each offset k ∈ [0, L-1] (L = b-a+1), compute
+// phi_pfx_k[t] = (prefix over phi of length a+k+1 starting at t) using
+// slidingReduce, and psi_shift_k[t] = psi[t+a+k] (with -∞ sentinel past
+// the trace end). The inner combine is a pairwise Minish, and the outer
+// reduction over k is a batched Maxish.
+//
+// The "overlap" flag is accepted for API compatibility with Python stlcg;
+// both values currently produce the overlap=true semantics above.
+func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, phiPrefixMax bool) *graph.Node {
+	_ = overlap
+
+	phi := c.compileFormula(left)
+	psi := c.compileFormula(right)
+
+	shape := phi.Shape()
+	T := shape.Dimensions[1]
+	a := iv.Lo
+	if a >= T {
+		panic(fmt.Sprintf("stlcg: Until/Then interval lo=%d >= trace length %d", a, T))
+	}
+	var b int
+	if iv.IsUnbounded() {
+		b = T - 1
+	} else {
+		b = iv.Hi
+		if b >= T {
+			b = T - 1
+		}
+	}
+	L := b - a + 1
+	if L < 1 {
+		panic(fmt.Sprintf("stlcg: Until/Then empty interval after clipping lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
+	}
+
+	// Pad psi on the right with -∞ sentinel so slicing out-of-range s is
+	// ignored by the outer max. The phi prefixes are already handled by
+	// slidingReduce's internal sentinel padding.
+	rank := shape.Rank()
+	padAxes := make([]backends.PadAxis, rank)
+	padAxes[1] = backends.PadAxis{Start: 0, End: a + L - 1}
+	psiPad := graph.Pad(psi, graph.Infinity(phi.Graph(), shape.DType, -1), padAxes...)
+
+	inner := make([]*graph.Node, L)
+	for k := 0; k < L; k++ {
+		// phi prefix over window [t, t+a+k] — length a+k+1 starting at 0.
+		phiPfx := c.slidingReduce(phi, Bounds(0, a+k), phiPrefixMax)
+
+		// psi shifted by (a+k).
+		axesSpec := make([]graph.SliceAxisSpec, rank)
+		for ax := 0; ax < rank; ax++ {
+			axesSpec[ax] = graph.AxisRange()
+		}
+		axesSpec[1] = graph.AxisRange(a+k, a+k+T)
+		psiSk := graph.Slice(psiPad, axesSpec...)
+
+		// inner_k = min(phi_pfx_k, psi_sk)
+		inner[k] = c.reducePair(phiPfx, psiSk, false)
+	}
+
+	stacked := graph.Stack(inner, rank)
+	mode, tie := c.minmaxMode()
+	return minmax.Maxish(stacked, rank, c.tau, mode, tie, false)
+}
+
+// compileIntegral lowers Integral1d(sub, [a,b], scheme) to a [B, T, 1]
+// trace. Riemann: sum over s ∈ [t+a, t+b] of rho(sub, s), using cumsum
+// differences. Trapezoid: Riemann minus 0.5 * (endpoints).
+func (c *compiler) compileIntegral(f *integralFormula) *graph.Node {
+	sub := c.compileFormula(f.sub)
+	shape := sub.Shape()
+	T := shape.Dimensions[1]
+	a := f.interval.Lo
+	b := f.interval.Hi
+	if a >= T {
+		panic(fmt.Sprintf("stlcg: Integral1d lo=%d >= trace length %d", a, T))
+	}
+	if b >= T {
+		b = T - 1
+	}
+	L := b - a + 1
+	if L < 1 {
+		panic(fmt.Sprintf("stlcg: Integral1d empty window lo=%d hi=%d T=%d", f.interval.Lo, f.interval.Hi, T))
+	}
+
+	rank := shape.Rank()
+	g := sub.Graph()
+
+	// Pad right with 0 so cumulative differences past the trace end
+	// contribute nothing.
+	zero := graph.Scalar(g, shape.DType, 0)
+	padAxes := make([]backends.PadAxis, rank)
+	padAxes[1] = backends.PadAxis{Start: 0, End: a + L - 1}
+	padded := graph.Pad(sub, zero, padAxes...)
+
+	// Prepend a single zero along the time axis so cum[t] now represents
+	// sum over indices strictly < t, letting us take cum[t+b+1] - cum[t+a]
+	// for an inclusive window [t+a, t+b].
+	leftOne := make([]backends.PadAxis, rank)
+	leftOne[1] = backends.PadAxis{Start: 1, End: 0}
+	cum := graph.CumSum(graph.Pad(padded, zero, leftOne...), 1)
+
+	// Slice at t+a and t+b+1 across t ∈ [0, T-1].
+	rangeSpec := func(start, end int) []graph.SliceAxisSpec {
+		s := make([]graph.SliceAxisSpec, rank)
+		for ax := 0; ax < rank; ax++ {
+			s[ax] = graph.AxisRange()
+		}
+		s[1] = graph.AxisRange(start, end)
+		return s
+	}
+	hi := graph.Slice(cum, rangeSpec(a+L, a+L+T)...)
+	lo := graph.Slice(cum, rangeSpec(a, a+T)...)
+	integral := graph.Sub(hi, lo)
+
+	if f.scheme == Trapezoid {
+		// Subtract half of the two endpoints: 0.5 * (sub[t+a] + sub[t+b]).
+		endsPad := graph.Pad(sub, zero, padAxes...)
+		lowEnd := graph.Slice(endsPad, rangeSpec(a, a+T)...)
+		highEnd := graph.Slice(endsPad, rangeSpec(b, b+T)...)
+		half := graph.Scalar(g, shape.DType, 0.5)
+		adjust := graph.Mul(graph.Add(lowEnd, highEnd), half)
+		integral = graph.Sub(integral, adjust)
+	}
+
+	return integral
 }
 
 // ensure dtypes import is used even if the compiler grows or shrinks.

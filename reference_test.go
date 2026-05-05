@@ -60,8 +60,113 @@ func (r *referenceEvaluator) rho(f Formula, signals map[string][]float64) []floa
 		return r.slidingReduce(r.rho(n.sub, signals), n.interval, false)
 	case *eventuallyFormula:
 		return r.slidingReduce(r.rho(n.sub, signals), n.interval, true)
+	case *untilFormula:
+		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, false)
+	case *thenFormula:
+		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, true)
+	case *integralFormula:
+		return r.integral(r.rho(n.sub, signals), n.interval, n.scheme)
 	}
 	panic(fmt.Sprintf("ref: unsupported formula %T", f))
+}
+
+// untilOrThen implements the reference semantics that mirrors the
+// compiler: at each t, for each offset k ∈ [0, L-1] build inner_k =
+// min(prefix_{t..t+a+k} phi, psi[t+a+k]) with past-end slots replaced by
+// the psi-side sentinel (-∞), and take the max (or smooth max) across k.
+// phiPrefixMax=true yields Then semantics; false yields Until.
+func (r *referenceEvaluator) untilOrThen(phi, psi []float64, iv Interval, phiPrefixMax bool) []float64 {
+	T := len(phi)
+	a := iv.Lo
+	var b int
+	if iv.IsUnbounded() {
+		b = T - 1
+	} else {
+		b = iv.Hi
+	}
+	if b > T-1 {
+		b = T - 1
+	}
+	L := b - a + 1
+	if L < 1 {
+		panic(fmt.Sprintf("ref: Until/Then empty interval lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
+	}
+
+	out := make([]float64, T)
+	for t := 0; t < T; t++ {
+		inner := make([]float64, L)
+		for k := 0; k < L; k++ {
+			s := t + a + k
+			if s >= T {
+				inner[k] = math.Inf(-1)
+				continue
+			}
+			// phi prefix over [t, s] inclusive.
+			win := make([]float64, s-t+1)
+			copy(win, phi[t:s+1])
+			phiPfx := r.reduceWindow(win, phiPrefixMax)
+
+			// Pairwise min with psi[s].
+			inner[k] = r.reducePairScalar(phiPfx, psi[s], false)
+		}
+		out[t] = r.reduceWindow(inner, true) // outer max
+	}
+	return out
+}
+
+// reducePairScalar: scalar-valued pair reduce matching Evaluator semantics.
+func (r *referenceEvaluator) reducePairScalar(x, y float64, wantMax bool) float64 {
+	switch r.mode {
+	case ModeExact:
+		if wantMax {
+			return math.Max(x, y)
+		}
+		return math.Min(x, y)
+	case ModeSmooth:
+		return smoothExtremum2(x, y, r.scale, wantMax)
+	}
+	panic("ref: unknown mode")
+}
+
+// integral is the reference implementation of Integral1d. Riemann:
+// sum over s ∈ [t+a, t+b] of phi[s]; past-end slots contribute 0.
+// Trapezoid: Riemann minus half the endpoints at t+a and t+b (or the
+// clipped endpoint) — the compiler does not clip the upper endpoint
+// for Trapezoid, so this matches.
+func (r *referenceEvaluator) integral(phi []float64, iv Interval, scheme IntegrationScheme) []float64 {
+	T := len(phi)
+	a := iv.Lo
+	b := iv.Hi
+	if b > T-1 {
+		b = T - 1
+	}
+	L := b - a + 1
+	if L < 1 {
+		panic(fmt.Sprintf("ref: Integral1d empty window lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
+	}
+
+	out := make([]float64, T)
+	for t := 0; t < T; t++ {
+		var sum float64
+		for k := 0; k < L; k++ {
+			idx := t + a + k
+			if idx < T {
+				sum += phi[idx]
+			}
+		}
+		if scheme == Trapezoid {
+			var endLow, endHigh float64
+			if t+a < T {
+				endLow = phi[t+a]
+			}
+			if t+b < T {
+				endHigh = phi[t+b]
+			}
+			sum -= 0.5 * (endLow + endHigh)
+		}
+		out[t] = sum
+	}
+	return out
 }
 
 // slidingReduce is the reference-evaluator counterpart of
