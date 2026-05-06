@@ -9,6 +9,13 @@ const (
 	// Riemann is a left-endpoint Riemann sum (cumulative-sum difference).
 	Riemann IntegrationScheme = iota
 	// Trapezoid is the trapezoidal rule, with half-weight on the endpoints.
+	//
+	// Tail convention: when the window reaches past the trace end
+	// (t+b >= T), the "high" endpoint defaults to zero rather than the
+	// clipped last-valid sample. This keeps the Riemann-plus-correction
+	// form simple and matches the library's reference evaluator, but
+	// may differ from implementations that clip the interval per-t.
+	// Near-end trapezoid values should be treated as approximate.
 	Trapezoid
 )
 

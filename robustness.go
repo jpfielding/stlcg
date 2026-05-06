@@ -227,6 +227,10 @@ func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) ([]any, er
 		if !ok {
 			return nil, fmt.Errorf("%w: %q", ErrMissingSignal, name)
 		}
+		if dt := t.Shape().DType; dt != defaultDType {
+			return nil, fmt.Errorf("%w: signal %q has dtype %v, want %v (multi-dtype support is a v1.1+ roadmap item)",
+				ErrBadShape, name, dt, defaultDType)
+		}
 		args = append(args, t)
 	}
 	pscale := float32(cfg.pscale)
