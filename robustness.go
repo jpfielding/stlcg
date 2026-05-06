@@ -160,29 +160,62 @@ func (e *Evaluator) Vars() []string {
 // RobustnessTrace evaluates the formula against signals and returns the
 // robustness trace of shape [B, T, 1]. Per-call options currently only
 // accept WithScale/WithPScale; other options are ignored.
+//
+// Panics on runtime error (closed evaluator, missing signal, exec failure).
+// Use RobustnessTraceE for an error-returning variant suitable for
+// library-embedded use.
 func (e *Evaluator) RobustnessTrace(signals SignalMap, perCall ...Option) *tensors.Tensor {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if e.closed {
-		panic("stlcg: Evaluator is closed")
-	}
-	args := e.assembleArgs(signals, perCall)
-	out, err := e.exec.Exec1(args...)
+	out, err := e.RobustnessTraceE(signals, perCall...)
 	if err != nil {
-		panic(fmt.Errorf("stlcg: Exec failed: %w", err))
+		panic(err)
 	}
 	return out
 }
 
-// Robustness returns the single-step robustness at the selected time as a
-// tensor of shape [B, 1].
-func (e *Evaluator) Robustness(signals SignalMap, at TimeSelector, perCall ...Option) *tensors.Tensor {
-	trace := e.RobustnessTrace(signals, perCall...)
-	defer trace.FinalizeAll()
-	return sliceAtTime(trace, at.t)
+// RobustnessTraceE is the error-returning counterpart of RobustnessTrace.
+// Runtime errors (closed evaluator, missing signal variable, gomlx Exec
+// failure) are wrapped with the sentinel errors in errors.go.
+// Programmer invariants (unknown AST types, arity mismatches) still panic.
+func (e *Evaluator) RobustnessTraceE(signals SignalMap, perCall ...Option) (*tensors.Tensor, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return nil, ErrClosed
+	}
+	args, err := e.assembleArgs(signals, perCall)
+	if err != nil {
+		return nil, err
+	}
+	out, err := e.exec.Exec1(args...)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrExec, err)
+	}
+	return out, nil
 }
 
-func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) []any {
+// Robustness returns the single-step robustness at the selected time as a
+// tensor of shape [B, 1].
+//
+// Panics on runtime error; see RobustnessE for the error-returning form.
+func (e *Evaluator) Robustness(signals SignalMap, at TimeSelector, perCall ...Option) *tensors.Tensor {
+	out, err := e.RobustnessE(signals, at, perCall...)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// RobustnessE is the error-returning counterpart of Robustness.
+func (e *Evaluator) RobustnessE(signals SignalMap, at TimeSelector, perCall ...Option) (*tensors.Tensor, error) {
+	trace, err := e.RobustnessTraceE(signals, perCall...)
+	if err != nil {
+		return nil, err
+	}
+	defer trace.FinalizeAll()
+	return sliceAtTimeE(trace, at.t)
+}
+
+func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) ([]any, error) {
 	cfg := e.cfg
 	for _, o := range perCall {
 		o(&cfg)
@@ -192,7 +225,7 @@ func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) []any {
 	for _, name := range e.varOrder {
 		t, ok := signals[name]
 		if !ok {
-			panic(fmt.Sprintf("stlcg: SignalMap missing required variable %q", name))
+			return nil, fmt.Errorf("%w: %q", ErrMissingSignal, name)
 		}
 		args = append(args, t)
 	}
@@ -202,7 +235,7 @@ func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) []any {
 		tau = 1.0 // unused inside the compiled graph but must be a valid scalar
 	}
 	args = append(args, pscale, tau)
-	return args
+	return args, nil
 }
 
 // zeroTraceTensor builds a [batch, timeLen, 1] Float32 tensor filled with
@@ -213,12 +246,23 @@ func zeroTraceTensor(batch, timeLen int) *tensors.Tensor {
 }
 
 // sliceAtTime extracts the [B, 1] slice at time t of a [B, T, 1] trace.
-// Negative t counts from the end. Materializes the data via ConstFlatData
-// and builds a fresh Tensor — intentionally simple for v1.
+// Negative t counts from the end. Panics on bad shape or OOB time; use
+// sliceAtTimeE internally when an error return is preferred.
 func sliceAtTime(trace *tensors.Tensor, t int) *tensors.Tensor {
+	out, err := sliceAtTimeE(trace, t)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// sliceAtTimeE is the error-returning counterpart of sliceAtTime.
+// v1 uses a host roundtrip (ConstFlatData + MutableFlatData). For hot
+// training loops, prefer BuildRobustnessTrace + a manual graph.Slice.
+func sliceAtTimeE(trace *tensors.Tensor, t int) (*tensors.Tensor, error) {
 	s := trace.Shape()
 	if s.Rank() < 2 {
-		panic(fmt.Sprintf("stlcg: robustness trace rank must be >= 2, got %d", s.Rank()))
+		return nil, fmt.Errorf("%w: robustness trace rank must be >= 2, got %d", ErrBadShape, s.Rank())
 	}
 	b := s.Dimensions[0]
 	tDim := s.Dimensions[1]
@@ -230,10 +274,11 @@ func sliceAtTime(trace *tensors.Tensor, t int) *tensors.Tensor {
 		t = tDim + t
 	}
 	if t < 0 || t >= tDim {
-		panic(fmt.Sprintf("stlcg: AtTime(%d) out of range for T=%d", t, tDim))
+		return nil, fmt.Errorf("%w: AtTime(%d) out of range for T=%d", ErrTimeOutOfRange, t, tDim)
 	}
 
 	out := tensors.FromShape(shapes.Make(s.DType, b, feat))
+	var loopErr error
 	err := tensors.ConstFlatData(trace, func(in []float32) {
 		werr := tensors.MutableFlatData(out, func(o []float32) {
 			for bi := 0; bi < b; bi++ {
@@ -243,11 +288,14 @@ func sliceAtTime(trace *tensors.Tensor, t int) *tensors.Tensor {
 			}
 		})
 		if werr != nil {
-			panic(werr)
+			loopErr = werr
 		}
 	})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("%w: %v", ErrBadShape, err)
 	}
-	return out
+	if loopErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadShape, loopErr)
+	}
+	return out, nil
 }
