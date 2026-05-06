@@ -7,6 +7,8 @@ lands; pre-1.0 releases may break.
 
 Changes that have not yet been tagged.
 
+## [0.1.1] — 2026-05-05
+
 ### Fixed
 
 - `logger.NewRobustnessMetric` now honors scalar options
