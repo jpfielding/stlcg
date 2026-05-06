@@ -273,10 +273,14 @@ func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *gr
 //     phi is only required before s; psi holding at t=s is sufficient
 //     (the phi-prefix becomes the identity element of min/max).
 //
-// Implementation: for each offset k ∈ [0, L-1] (L = b-a+1), compute
-// phi_pfx_k[t] = (prefix over phi of length a+k+1 [overlap] or a+k
-// [no overlap]), and psi_shift_k[t] = psi[t+a+k]. The inner combine is
-// a pairwise Minish, and the outer reduction over k is a batched Maxish.
+// Implementation is an O(L) recurrence. Let upper_k = a+k (overlap=true)
+// or a+k-1 (overlap=false). The seed phi_pfx_0 is the min/max of phi
+// over window [t, t+upper_0]; each subsequent step extends by one slot:
+//
+//	phi_pfx_k = reducePair(phi_pfx_{k-1}, phi[t+upper_k], phiPrefixMax)
+//
+// This avoids rebuilding L sliding-window reductions (the prior
+// O(L^2) graph-size cost), giving O(L) slices + O(L) pair reductions.
 func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, phiPrefixMax bool) *graph.Node {
 	phi := c.compileFormula(left)
 	psi := c.compileFormula(right)
@@ -301,49 +305,71 @@ func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, p
 		panic(fmt.Sprintf("stlcg: Until/Then empty interval after clipping lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
 	}
 
-	// Pad psi on the right with -∞ sentinel so slicing out-of-range s is
-	// ignored by the outer max. The phi prefixes are already handled by
-	// slidingReduce's internal sentinel padding. VJP-safe pad path.
 	rank := shape.Rank()
-	psiFill := graph.Infinity(phi.Graph(), shape.DType, -1)
-	psiPad := padTimeAxisRight(psi, psiFill, a+L-1)
 
-	// Empty-prefix sentinel for overlap=false at k=0, a=0: identity of the
-	// prefix reduction. +∞ for Until (min), -∞ for Then (max).
-	emptySign := +1
+	// Sentinels.
+	// psi padding: -∞ (outer max identity). Past the trace end psi never
+	// wins.
+	// phi padding: +∞ for Until (min identity) or -∞ for Then (max
+	// identity). Past the trace end phi never loses.
+	psiFill := graph.Infinity(phi.Graph(), shape.DType, -1)
+	phiFillSign := +1
 	if phiPrefixMax {
-		emptySign = -1
+		phiFillSign = -1
 	}
-	emptyFill := graph.Infinity(phi.Graph(), shape.DType, emptySign)
-	emptyPrefix := graph.BroadcastToShape(emptyFill, shape)
+	phiFill := graph.Infinity(phi.Graph(), shape.DType, phiFillSign)
+
+	padRight := a + L - 1
+	psiPad := padTimeAxisRight(psi, psiFill, padRight)
+	phiPad := padTimeAxisRight(phi, phiFill, padRight)
+
+	// sliceAt returns a [B, T, F] slice starting at offset `start` along
+	// axis 1. Works on padded tensors where start+T is in range.
+	sliceAt := func(node *graph.Node, start int) *graph.Node {
+		spec := make([]graph.SliceAxisSpec, rank)
+		for ax := 0; ax < rank; ax++ {
+			spec[ax] = graph.AxisRange()
+		}
+		spec[1] = graph.AxisRange(start, start+T)
+		return graph.Slice(node, spec...)
+	}
+
+	// Seed phi prefix.
+	// upper_0 = a (overlap) or a-1 (no overlap).
+	seedUpper := a
+	if !overlap {
+		seedUpper = a - 1
+	}
+	var phiPfx *graph.Node
+	switch {
+	case seedUpper < 0:
+		// Empty prefix: broadcast the phi-reduction identity.
+		phiPfx = graph.BroadcastToShape(phiFill, shape)
+	case seedUpper == 0:
+		// Single-sample prefix: no reduction needed, just phi[t].
+		phiPfx = sliceAt(phiPad, 0)
+	default:
+		// Window [0, seedUpper] reduction. slidingReduce handles
+		// sentinel padding internally; it is O(seedUpper+1) slices
+		// paid ONCE, not per k.
+		phiPfx = c.slidingReduce(phi, Bounds(0, seedUpper), phiPrefixMax)
+	}
 
 	inner := make([]*graph.Node, L)
-	for k := 0; k < L; k++ {
-		// phi prefix window upper index (inclusive offset from t).
-		// overlap=true:  [t, t+a+k]    -> upper = a+k
-		// overlap=false: [t, t+a+k-1]  -> upper = a+k-1 (empty if <0)
-		upper := a + k
+	// k=0
+	inner[0] = c.reducePair(phiPfx, sliceAt(psiPad, a), false)
+
+	// k>=1: extend the prefix one sample and pair with the shifted psi.
+	for k := 1; k < L; k++ {
+		// nextIdx = upper_k: a+k (overlap) or a+k-1 (no overlap).
+		nextIdx := a + k
 		if !overlap {
-			upper = a + k - 1
+			nextIdx = a + k - 1
 		}
+		phiShift := sliceAt(phiPad, nextIdx)
+		phiPfx = c.reducePair(phiPfx, phiShift, phiPrefixMax)
 
-		var phiPfx *graph.Node
-		if upper < 0 {
-			phiPfx = emptyPrefix
-		} else {
-			phiPfx = c.slidingReduce(phi, Bounds(0, upper), phiPrefixMax)
-		}
-
-		// psi shifted by (a+k).
-		axesSpec := make([]graph.SliceAxisSpec, rank)
-		for ax := 0; ax < rank; ax++ {
-			axesSpec[ax] = graph.AxisRange()
-		}
-		axesSpec[1] = graph.AxisRange(a+k, a+k+T)
-		psiSk := graph.Slice(psiPad, axesSpec...)
-
-		// inner_k = min(phi_pfx_k, psi_sk)
-		inner[k] = c.reducePair(phiPfx, psiSk, false)
+		inner[k] = c.reducePair(phiPfx, sliceAt(psiPad, a+k), false)
 	}
 
 	stacked := graph.Stack(inner, rank)
