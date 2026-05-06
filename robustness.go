@@ -288,20 +288,10 @@ func zeroTraceTensor(batch, timeLen int) *tensors.Tensor {
 	return tensors.FromShape(shapes.Make(defaultDType, batch, timeLen, 1))
 }
 
-// sliceAtTime extracts the [B, 1] slice at time t of a [B, T, 1] trace.
-// Negative t counts from the end. Panics on bad shape or OOB time; use
-// sliceAtTimeE internally when an error return is preferred.
-func sliceAtTime(trace *tensors.Tensor, t int) *tensors.Tensor {
-	out, err := sliceAtTimeE(trace, t)
-	if err != nil {
-		panic(err)
-	}
-	return out
-}
-
-// sliceAtTimeE is the error-returning counterpart of sliceAtTime.
-// v1 uses a host roundtrip (ConstFlatData + MutableFlatData). For hot
-// training loops, prefer BuildRobustnessTrace + a manual graph.Slice.
+// sliceAtTimeE extracts the [B, 1] slice at time t of a [B, T, 1] trace.
+// Negative t counts from the end. v1 uses a host roundtrip (ConstFlatData
+// + MutableFlatData); for hot training loops, prefer BuildRobustnessTrace
+// + a manual graph.Slice.
 func sliceAtTimeE(trace *tensors.Tensor, t int) (*tensors.Tensor, error) {
 	s := trace.Shape()
 	if s.Rank() < 2 {

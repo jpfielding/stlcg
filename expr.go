@@ -22,14 +22,6 @@ func Var(name string) Expr {
 	return &variable{name: name}
 }
 
-// Name returns the variable name if e is a *variable, else "".
-func varName(e Expr) string {
-	if v, ok := e.(*variable); ok {
-		return v.name
-	}
-	return ""
-}
-
 type constant struct{ value float64 }
 
 func (c *constant) Vars() []string { return nil }

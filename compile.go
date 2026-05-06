@@ -162,26 +162,6 @@ func padTimeAxisRight(sub, fill *graph.Node, padEnd int) *graph.Node {
 	return graph.Concatenate([]*graph.Node{sub, sentinel}, 1)
 }
 
-// padTimeAxisLeft prepends padStart values of fill along axis 1, via
-// Concatenate. Same VJP-safe reason as padTimeAxisRight.
-func padTimeAxisLeft(sub, fill *graph.Node, padStart int) *graph.Node {
-	if padStart <= 0 {
-		return sub
-	}
-	shape := sub.Shape()
-	rank := shape.Rank()
-	padDims := make([]int, rank)
-	for i := 0; i < rank; i++ {
-		padDims[i] = shape.Dimensions[i]
-	}
-	padDims[1] = padStart
-
-	padShape := shape
-	padShape.Dimensions = padDims
-	sentinel := graph.StopGradient(graph.BroadcastToShape(fill, padShape))
-	return graph.Concatenate([]*graph.Node{sentinel, sub}, 1)
-}
-
 // slidingReduce computes a forward-time windowed min/max along the time
 // axis (axis 1) of sub ([B, T, 1]). For bounded Interval [a, b], the
 // output at time t is the reduction over sub[t+a : t+b+1] (inclusive
