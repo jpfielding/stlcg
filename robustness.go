@@ -6,10 +6,15 @@ import (
 	"sync"
 
 	"github.com/gomlx/gomlx/backends"
+	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/core/tensors"
 )
+
+// defaultDType is the only dtype supported in v1. Multi-dtype support is
+// tracked for v1.1+.
+const defaultDType = dtypes.Float32
 
 // SignalMap binds variable names to tensors at evaluation time.
 //
@@ -55,9 +60,6 @@ func NewEvaluator(be backends.Backend, formula Formula, opts ...Option) *Evaluat
 	for _, o := range opts {
 		o(&cfg)
 	}
-	if cfg.agm {
-		panic("stlcg: WithAGM is not yet implemented (Phase D follow-up)")
-	}
 	if cfg.scale == 0 {
 		cfg.mode = ModeExact
 	}
@@ -92,6 +94,37 @@ func (e *Evaluator) SetMaxCache(n int) *Evaluator {
 	defer e.mu.Unlock()
 	e.exec.SetMaxCache(n)
 	return e
+}
+
+// Precompile warms the shape cache by running the Evaluator once for each
+// (batch, timeLen) pair. Each pair triggers a graph build + JIT compile
+// so that subsequent RobustnessTrace calls with matching shapes hit the
+// cache instead of paying compile cost.
+//
+// All input tensors are assumed to share the [batch, timeLen, 1] layout
+// that the library expects across every signal variable. Dtype defaults
+// to Float32 (the only supported dtype in v1).
+//
+// Returns the first error encountered. Compile cache may be partially
+// populated on error. Precompile is safe to call concurrently; it takes
+// the same read lock as RobustnessTrace.
+func (e *Evaluator) Precompile(shapes ...[2]int) error {
+	for _, s := range shapes {
+		b, tLen := s[0], s[1]
+		if b <= 0 || tLen <= 0 {
+			return fmt.Errorf("stlcg: Precompile: invalid shape [batch=%d, time=%d]", b, tLen)
+		}
+		sig := make(SignalMap, len(e.varOrder))
+		for _, name := range e.varOrder {
+			sig[name] = zeroTraceTensor(b, tLen)
+		}
+		out := e.RobustnessTrace(sig)
+		out.FinalizeAll()
+		for _, t := range sig {
+			t.FinalizeAll()
+		}
+	}
+	return nil
 }
 
 // Close finalizes the underlying Exec and releases backend resources.
@@ -161,6 +194,13 @@ func (e *Evaluator) assembleArgs(signals SignalMap, perCall []Option) []any {
 	}
 	args = append(args, pscale, tau)
 	return args
+}
+
+// zeroTraceTensor builds a [batch, timeLen, 1] Float32 tensor filled with
+// zeros — used by Precompile to drive graph construction without
+// caring about tensor contents.
+func zeroTraceTensor(batch, timeLen int) *tensors.Tensor {
+	return tensors.FromShape(shapes.Make(defaultDType, batch, timeLen, 1))
 }
 
 // sliceAtTime extracts the [B, 1] slice at time t of a [B, T, 1] trace.

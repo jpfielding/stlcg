@@ -47,8 +47,6 @@ func (t TiePolicy) String() string {
 type config struct {
 	mode   Mode
 	tie    TiePolicy
-	agm    bool
-	keep   bool
 	pscale float64
 	scale  float64 // tau = abs(scale); 0 forces ModeExact
 }
@@ -57,8 +55,6 @@ func defaultConfig() config {
 	return config{
 		mode:   ModeSmooth,
 		tie:    TieArgmax,
-		agm:    false,
-		keep:   true,
 		pscale: 1.0,
 		scale:  1.0,
 	}
@@ -73,15 +69,6 @@ func WithMode(m Mode) Option { return func(c *config) { c.mode = m } }
 // WithTieGradient sets the tie-gradient policy.
 func WithTieGradient(t TiePolicy) Option { return func(c *config) { c.tie = t } }
 
-// WithAGM enables arithmetic-geometric mean robustness.
-// Currently unimplemented (Phase D follow-up); setting true will panic at
-// compile time until support lands.
-func WithAGM(on bool) Option { return func(c *config) { c.agm = on } }
-
-// WithKeepDim retains the reduced axis as size 1. Default true, matching the
-// Python original's convention.
-func WithKeepDim(on bool) Option { return func(c *config) { c.keep = on } }
-
 // WithPScale sets the predicate-robustness scale factor. Fed as a graph
 // parameter; changing it does not trigger recompile.
 func WithPScale(v float64) Option { return func(c *config) { c.pscale = v } }
@@ -89,4 +76,7 @@ func WithPScale(v float64) Option { return func(c *config) { c.pscale = v } }
 // WithScale sets the smooth-approximation temperature. Interpreted as
 // tau = |scale|. Fed as a graph parameter; changing it does not trigger
 // recompile. If scale == 0, Mode is coerced to ModeExact at compile time.
+// Values in (0, 1e-3] are numerically unstable: the smooth min/max
+// expression lse(tau*x)/tau diverges as tau -> 0+. Use ModeExact for
+// that regime instead.
 func WithScale(v float64) Option { return func(c *config) { c.scale = v } }

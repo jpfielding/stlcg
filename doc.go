@@ -29,7 +29,7 @@
 //	y := stlcg.Var("y")
 //	phi := stlcg.Always(stlcg.And(stlcg.Gt(x, stlcg.Const(5)),
 //	                              stlcg.Not(stlcg.Lt(y, stlcg.Const(2)))),
-//	                    stlcg.Interval(0, 50))
+//	                    stlcg.Bounds(0, 50))
 //
 // and binds the tensors at evaluation time via a map keyed on the variable
 // names.

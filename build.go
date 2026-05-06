@@ -16,10 +16,9 @@ import (
 // must belong to the same *graph.Graph. pscale and tau are scalar nodes;
 // typical callers build them via graph.Scalar or as feedable parameters.
 //
-// Option values control topology-affecting knobs (Mode, TieGradient,
-// KeepDim, AGM). WithPScale / WithScale option *values* are ignored —
-// the tensor values come from the pscale/tau node arguments. WithAGM is
-// not yet implemented and will panic.
+// Option values control topology-affecting knobs (Mode, TieGradient).
+// WithPScale / WithScale option *values* are ignored — the tensor values
+// come from the pscale/tau node arguments.
 func BuildRobustnessTrace(
 	formula Formula,
 	signals map[string]*graph.Node,
@@ -29,9 +28,6 @@ func BuildRobustnessTrace(
 	cfg := defaultConfig()
 	for _, o := range opts {
 		o(&cfg)
-	}
-	if cfg.agm {
-		panic("stlcg: WithAGM is not yet implemented")
 	}
 
 	varOrder := formula.Vars()
