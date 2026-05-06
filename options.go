@@ -101,3 +101,38 @@ func WithPScale(v float64) Option { return func(c *config) { c.pscale = v } }
 // expression lse(tau*x)/tau diverges as tau -> 0+. Use ModeExact for
 // that regime instead.
 func WithScale(v float64) Option { return func(c *config) { c.scale = v } }
+
+// Config is a readonly view of the option-resolved configuration.
+// Useful for callers that need to inspect scalar option values after
+// applying an []Option — notably logger.NewRobustnessMetric, where
+// scalar options must be read out of the option list because
+// BuildRobustnessTrace ignores them (see build.go).
+//
+// Config is intentionally opaque: the accessors are the public API,
+// the underlying fields are not. Construct via ResolveConfig.
+type Config struct {
+	c config
+}
+
+// ResolveConfig applies opts to a defaulted config and returns it as
+// a readonly Config. Defaults: ModeSmooth, TieArgmax, PScale=1.0,
+// Scale=1.0.
+func ResolveConfig(opts ...Option) Config {
+	cfg := defaultConfig()
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return Config{c: cfg}
+}
+
+// Mode returns the resolved evaluation mode.
+func (r Config) Mode() Mode { return r.c.mode }
+
+// Tie returns the resolved tie-gradient policy.
+func (r Config) Tie() TiePolicy { return r.c.tie }
+
+// PScale returns the resolved predicate-robustness scale factor.
+func (r Config) PScale() float64 { return r.c.pscale }
+
+// Scale returns the resolved smooth-approximation scale (tau = |Scale|).
+func (r Config) Scale() float64 { return r.c.scale }

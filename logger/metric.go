@@ -36,10 +36,17 @@ type RobustnessMetric struct {
 
 // NewRobustnessMetric builds a metric with the given label and formula.
 // Name defaults to "robustness" when empty.
+//
+// Both scalar options (stlcg.WithPScale / stlcg.WithScale) and topology
+// options (stlcg.WithMode / stlcg.WithTieGradient / stlcg.WithOverlap)
+// are honored. The scalars are resolved here because BuildRobustnessTrace
+// intentionally ignores scalar option values — they must be baked into
+// the pscale/tau graph nodes, which this metric constructs in UpdateGraph.
 func NewRobustnessMetric(name string, phi stlcg.Formula, opts ...stlcg.Option) *RobustnessMetric {
 	if name == "" {
 		name = "robustness"
 	}
+	cfg := stlcg.ResolveConfig(opts...)
 	return &RobustnessMetric{
 		name:       name,
 		shortName:  "rho",
@@ -47,13 +54,14 @@ func NewRobustnessMetric(name string, phi stlcg.Formula, opts ...stlcg.Option) *
 		metricType: "robustness",
 		formula:    phi,
 		opts:       opts,
-		pscale:     1.0,
-		scale:      1.0,
+		pscale:     cfg.PScale(),
+		scale:      cfg.Scale(),
 	}
 }
 
-// WithPScale / WithScale set the compile-time scalar values. These are
-// baked into the metric graph — adjust by constructing a new metric.
+// WithPScale / WithScale override the scalar values post-construction.
+// Chainable. Equivalent to passing stlcg.WithPScale / stlcg.WithScale to
+// NewRobustnessMetric.
 func (m *RobustnessMetric) WithPScale(v float64) *RobustnessMetric { m.pscale = v; return m }
 func (m *RobustnessMetric) WithScale(v float64) *RobustnessMetric  { m.scale = v; return m }
 

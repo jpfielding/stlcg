@@ -128,6 +128,74 @@ func TestRobustnessMetricBuildsGraph(t *testing.T) {
 	}
 }
 
+// TestRobustnessMetric_ConstructorScalarOptions guards against a regression
+// where NewRobustnessMetric accepted stlcg.WithPScale / stlcg.WithScale but
+// silently dropped their values, because BuildRobustnessTrace ignores scalar
+// option values (build.go). The constructor must resolve scalars into the
+// metric's own pscale/scale fields up-front.
+func TestRobustnessMetric_ConstructorScalarOptions(t *testing.T) {
+	be := backends.MustNew()
+
+	x := stlcg.Var("x")
+	phi := stlcg.Gt(x, stlcg.Const(0.5))
+	// WithPScale(2.0) should multiply predicate output: mean 1.0 → 2.0.
+	metric := logger.NewRobustnessMetric("rho", phi,
+		stlcg.WithMode(stlcg.ModeExact),
+		stlcg.WithPScale(2.0),
+	)
+
+	fn := func(signal *graph.Node) *graph.Node {
+		return metric.UpdateGraph(nil, nil, []*graph.Node{signal})
+	}
+	exec, err := graph.NewExec(be, fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Finalize()
+
+	trace := tensors.FromShape(shapes.Make(dtypes.Float32, 1, 4, 1))
+	if err := tensors.MutableFlatData(trace, func(d []float32) {
+		d[0] = 0
+		d[1] = 1
+		d[2] = 2
+		d[3] = 3
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Exec1(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.FinalizeAll()
+
+	var got float32
+	if err := tensors.ConstFlatData(out, func(d []float32) { got = d[0] }); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-fix behavior: got ≈ 1.0 (pscale silently clamped to default).
+	// Post-fix: got ≈ 2.0.
+	if got < 1.99 || got > 2.01 {
+		t.Errorf("mean robustness with WithPScale(2.0) = %g, want ≈ 2.0 "+
+			"(got 1.0 means constructor dropped the scalar option)", got)
+	}
+}
+
+// TestRobustnessMetric_PrettyPrintNonScalar covers the !IsScalar fallback
+// which delegates verbatim to tensors.Tensor.String().
+func TestRobustnessMetric_PrettyPrintNonScalar(t *testing.T) {
+	m := logger.NewRobustnessMetric("r", stlcg.Gt(stlcg.Var("x"), stlcg.Const(0.0)))
+	ns := tensors.FromShape(shapes.Make(dtypes.Float32, 3))
+	defer ns.FinalizeAll()
+	if err := tensors.MutableFlatData(ns, func(d []float32) {
+		d[0], d[1], d[2] = 1, 2, 3
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := m.PrettyPrint(ns), ns.String(); got != want {
+		t.Fatalf("PrettyPrint(non-scalar) = %q, want %q", got, want)
+	}
+}
+
 func TestRobustnessMetricInterfaceShape(t *testing.T) {
 	m := logger.NewRobustnessMetric("foo", stlcg.Gt(stlcg.Var("x"), stlcg.Const(0.0)))
 	if m.Name() != "foo" {
