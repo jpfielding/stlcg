@@ -94,7 +94,7 @@ differentiate; ergonomics not yet frozen for a 1.0 release.
 | `RobustnessMetric` implementing gomlx `metrics.Interface` | ✅ |
 | Graphviz DOT emission | ✅ |
 | CLI + runnable examples | ✅ |
-| AGM robustness (`WithAGM`) | ❌ panics (future work) |
+| AGM robustness | ❌ removed (v2 roadmap; the former `WithAGM` option was non-functional and deleted pre-v0.1.0) |
 | TensorBoard summary output | ❌ JSONL only |
 | Python stlcg parity fixtures | ⚠️ generator committed; not run in CI |
 
@@ -109,7 +109,7 @@ to `~/Library/Application Support/go-xla` (macOS) or the XDG cache dir
 (Linux) on first use. CPU backend works out of the box; for GPU, follow
 [gomlx's backend setup](https://github.com/gomlx/gomlx#install).
 
-Requires Go 1.26.x or newer.
+Requires Go 1.25 or newer (CI runs 1.25.x and 1.26.x).
 
 ## Quickstart
 
@@ -488,7 +488,7 @@ go test -bench=. -benchtime=10x -benchmem ./...
 | Time axis | reversed internally | forward throughout |
 | Formula construction | operator overloading on `Expression` | constructor functions (`Gt(x, Const(5))`) |
 | `distributed=True` | one bool | `Mode` × `TieGradient` as orthogonal knobs |
-| AGM robustness | `agm=True` | not yet implemented |
+| AGM robustness | `agm=True` | not implemented (v2 roadmap) |
 | Visualization | graphviz + IPython | stdlib DOT writer; pipe to `dot` |
 | Training hookup | bare PyTorch autograd | gomlx `train.Trainer` metrics + graph-level seam |
 | Logger | TF1 tensorboard | JSONL (+ user converts if TB needed) |
@@ -550,8 +550,9 @@ Test inventory (12 test files):
 
 Shape of v1.0, in rough priority order:
 
-1. AGM robustness (`WithAGM` currently panics).
-2. Python stlcg parity fixtures committed & checked in CI.
+1. AGM robustness (arithmetic-geometric mean; deferred to v2).
+2. Python stlcg parity fixtures committed & checked in CI
+   ([issue #1](https://github.com/jpfielding/stlcg/issues/1)).
 3. Segment-monoid DP for Until/Then (O(T log W) vs. current O(L²)) if
    profiles justify it.
 4. Multi-dtype support (currently float32-only).

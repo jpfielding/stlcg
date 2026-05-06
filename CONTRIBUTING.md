@@ -28,7 +28,7 @@ cd stlcg
 go mod download
 ```
 
-You need Go **1.26.1 or later** (see `go.mod`).
+You need Go **1.25 or later** (see `go.mod`). CI runs both 1.25.x and 1.26.x.
 
 ### Running the suite
 

@@ -35,6 +35,11 @@ func BuildRobustnessTrace(
 	for _, name := range varOrder {
 		n, ok := signals[name]
 		if !ok {
+			// Graph-build-time programmer invariant: the caller wired
+			// a formula whose Vars() do not match the signals map.
+			// Runtime errors (missing signals during evaluation) are
+			// surfaced via Evaluator.RobustnessTraceE; this path is
+			// construction-only and treated like compile errors.
 			panic(fmt.Sprintf("stlcg: BuildRobustnessTrace missing variable %q", name))
 		}
 		inputs = append(inputs, n)

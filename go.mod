@@ -1,6 +1,6 @@
 module github.com/jpfielding/stlcg
 
-go 1.26.1
+go 1.25.0
 
 require github.com/gomlx/gomlx v0.27.3
 
