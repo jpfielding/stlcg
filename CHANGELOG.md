@@ -3,7 +3,37 @@
 All notable changes to stlcg.go are recorded here. Semver once v1.0.0
 lands; pre-1.0 releases may break.
 
-## [Unreleased] — v1.0.0 candidate
+## [Unreleased]
+
+Changes that have not yet been tagged.
+
+### Fixed
+
+- `robustness.go:sliceAtTimeE` now finalizes its output tensor on error
+  paths (was leaked) and reports data-access failures as `ErrExec`
+  rather than `ErrBadShape`.
+- `Evaluator.Precompile` now surfaces Exec errors via the return value
+  and finalizes signal tensors on all paths (previously panicked via
+  the wrapping `RobustnessTrace` and leaked tensors on failure).
+
+### Added
+
+- `RobustnessTraceE` pre-flight rejects formulas whose bounded
+  temporal interval lower bound exceeds the runtime trace length,
+  returning `ErrBadShape` instead of panicking through gomlx's lazy
+  compile. Covered by `TestRobustnessTraceE_IntervalExceedsTrace`.
+- `WithMode` and `WithTieGradient` now panic at option-construction on
+  invalid enum values, not during graph compilation.
+- `parity_test.go` enforces an ID→Formula registry and aggregates
+  unregistered fixture IDs into a single test failure — closes the
+  "parses fixtures but compares nothing" silent-pass bug.
+
+### Changed
+
+- `go.mod` minimum Go version relaxed from 1.26.1 to 1.25 (gomlx's
+  floor). CI matrix runs 1.25.x and 1.26.x.
+
+## [0.1.0] — 2026-05-05 (v1.0.0 candidate)
 
 ### Breaking
 
@@ -85,7 +115,8 @@ lands; pre-1.0 releases may break.
   be generated against a pinned upstream commit of
   `stanfordASL/stlcg`. `parity_test.go` skips when the directory is
   absent; the generator (`testdata/generate_fixtures.py`) is committed
-  but unexecuted.
+  but unexecuted. Tracked at
+  <https://github.com/jpfielding/stlcg/issues/1>.
 - `sliceAtTime` still does a host roundtrip; in-graph slice path is a
   v1.1 item (does not affect training loops that use
   `BuildRobustnessTrace`).
