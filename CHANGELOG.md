@@ -9,6 +9,51 @@ Changes that have not yet been tagged.
 
 ### Fixed
 
+- `logger.NewRobustnessMetric` now honors scalar options
+  (`stlcg.WithPScale`, `stlcg.WithScale`) passed through its variadic
+  `opts` parameter. Previously such options were stored and forwarded to
+  `BuildRobustnessTrace`, which intentionally ignores scalar option
+  *values* — so callers got `pscale=1.0` and `scale=1.0` silently. The
+  constructor now resolves scalars into the metric's own fields
+  up-front. Regression covered by
+  `TestRobustnessMetric_ConstructorScalarOptions`.
+
+### Added
+
+- Public `stlcg.Config` readonly view + `stlcg.ResolveConfig(opts ...Option) Config`
+  helper exposing `Mode()`, `Tie()`, `PScale()`, and `Scale()` accessors.
+  Used by `logger.NewRobustnessMetric` and available to any caller that
+  needs to inspect the resolved effect of an `[]Option`.
+
+### Removed
+
+- Three unused internal helpers deleted (staticcheck `U1000`):
+  `compile.padTimeAxisLeft` (O(L) Until/Then rewrite made it unreachable),
+  `expr.varName` (superseded by direct AST walking in `walk.go`),
+  `robustness.sliceAtTime` (panic-wrapper over `sliceAtTimeE`; the
+  panic/`E` convention is already represented by the exported
+  `Robustness`/`RobustnessE` pair). No public-API impact.
+
+### Docs
+
+- README JSONL example now propagates `os.Create` errors instead of
+  discarding them with `_`.
+
+### Test
+
+- `TestRobustnessMetric_PrettyPrintNonScalar` asserts the non-scalar
+  fallback of `RobustnessMetric.PrettyPrint` against
+  `tensors.Tensor.String()`.
+
+## [0.1.0] — 2026-05-05 (v1.0.0 candidate)
+
+> CHANGELOG correction: the entries below marked `(post-0.1.0 CHANGELOG
+> fold-in)` shipped in the v0.1.0 tag (`9451527`) but were mis-filed
+> under `[Unreleased]` in that release's tree. They are folded in here
+> retroactively in v0.1.1.
+
+### Fixed (post-0.1.0 CHANGELOG fold-in)
+
 - `robustness.go:sliceAtTimeE` now finalizes its output tensor on error
   paths (was leaked) and reports data-access failures as `ErrExec`
   rather than `ErrBadShape`.
@@ -16,7 +61,7 @@ Changes that have not yet been tagged.
   and finalizes signal tensors on all paths (previously panicked via
   the wrapping `RobustnessTrace` and leaked tensors on failure).
 
-### Added
+### Added (post-0.1.0 CHANGELOG fold-in)
 
 - `RobustnessTraceE` pre-flight rejects formulas whose bounded
   temporal interval lower bound exceeds the runtime trace length,
@@ -28,12 +73,10 @@ Changes that have not yet been tagged.
   unregistered fixture IDs into a single test failure — closes the
   "parses fixtures but compares nothing" silent-pass bug.
 
-### Changed
+### Changed (post-0.1.0 CHANGELOG fold-in)
 
 - `go.mod` minimum Go version relaxed from 1.26.1 to 1.25 (gomlx's
   floor). CI matrix runs 1.25.x and 1.26.x.
-
-## [0.1.0] — 2026-05-05 (v1.0.0 candidate)
 
 ### Breaking
 
