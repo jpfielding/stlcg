@@ -1,0 +1,19 @@
+# Built binaries
+/stlcg
+/cmd/stlcg/stlcg
+/examples/simple/simple
+/examples/train/train
+
+# Go tooling
+*.test
+*.out
+*.prof
+coverage.out
+coverage.txt
+/testdata/fixtures/*.out
+
+# Editor droppings
+*.swp
+.idea/
+.vscode/
+.DS_Store
