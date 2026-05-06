@@ -74,18 +74,96 @@ func TestPythonParityFixtures(t *testing.T) {
 		t.Skipf("no fixtures found in %s", dir)
 	}
 
+	// Registry enforcement: fixtures with an unregistered ID are
+	// aggregated and reported in a single failure after the loop. This
+	// catches the silent-pass bug (prior version ran a discard loop with
+	// no comparison) without producing one red line per orphaned fixture.
+	var unknown []string
 	for _, fx := range fixtures {
+		form, ok := parityRegistry[fx.ID]
+		if !ok {
+			unknown = append(unknown, fx.ID)
+			continue
+		}
 		t.Run(fx.ID, func(t *testing.T) {
-			// We can't reconstruct the formula AST from the string label —
-			// the fixture parser is a vehicle for future hand-written
-			// stlcg.Formula values indexed by fx.ID. For v1, simply verify
-			// the schema parsed; when fixtures arrive, add a registry
-			// mapping ID → Formula in this test file.
 			if len(fx.RhoTrace) == 0 {
 				t.Skip("empty expected trace")
 			}
-			_ = fx // placeholder until ID→Formula registry exists
+			runParityCase(t, form, fx)
 		})
+	}
+	if len(unknown) > 0 {
+		t.Errorf("parity fixtures with no registered Formula (add to parityRegistry): %v", unknown)
+	}
+}
+
+// parityRegistry maps fixture ID → Go Formula. Populated incrementally
+// as fixtures are generated upstream (see testdata/generate_fixtures.py
+// and issue #1). A fixture ID without a matching entry fails the test.
+var parityRegistry = map[string]Formula{
+	// Populated when issue #1 lands Python-generated fixtures.
+}
+
+// runParityCase evaluates form against the fixture's signals and
+// compares rho_trace element-wise. Tolerance is tighter for exact mode
+// (no smoothing noise) than smooth mode.
+func runParityCase(t *testing.T, form Formula, fx fixture) {
+	t.Helper()
+
+	opts := []Option{WithPScale(fx.PScale)}
+	var tol float64
+	switch fx.Mode {
+	case "exact":
+		opts = append(opts, WithMode(ModeExact), WithScale(0))
+		tol = 1e-6
+	case "smooth":
+		opts = append(opts, WithMode(ModeSmooth), WithScale(fx.Scale))
+		tol = 1e-4
+	default:
+		t.Fatalf("unknown mode %q", fx.Mode)
+	}
+
+	// All fixtures are batch=1. Build a [1, T, 1] tensor per signal.
+	sig := make(SignalMap, len(fx.Signals))
+	defer func() {
+		for _, v := range sig {
+			v.FinalizeAll()
+		}
+	}()
+	for name, vals := range fx.Signals {
+		tn := tensors.FromShape(shapes.Make(dtypes.Float32, 1, len(vals), 1))
+		if err := tensors.MutableFlatData(tn, func(d []float32) {
+			for i, v := range vals {
+				d[i] = float32(v)
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		sig[name] = tn
+	}
+
+	e := NewEvaluator(testBackend, form, opts...)
+	defer e.Close()
+
+	trace, err := e.RobustnessTraceE(sig)
+	if err != nil {
+		t.Fatalf("RobustnessTraceE: %v", err)
+	}
+	defer trace.FinalizeAll()
+
+	got := make([]float64, len(fx.RhoTrace))
+	if err := tensors.ConstFlatData(trace, func(d []float32) {
+		for i := 0; i < len(got) && i < len(d); i++ {
+			got[i] = float64(d[i])
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, want := range fx.RhoTrace {
+		if math.Abs(got[i]-want) > tol {
+			t.Errorf("%s[%d] = %g, want %g (tol %g)", fx.ID, i, got[i], want, tol)
+		}
 	}
 }
 
