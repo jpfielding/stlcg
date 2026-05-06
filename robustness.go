@@ -37,8 +37,10 @@ func AtTime(t int) TimeSelector { return TimeSelector{t: t} }
 // fixed Mode/Tie topology. Mutable scalars (scale, pscale) are fed per call
 // as graph parameters and do not invalidate the cache.
 //
-// Shape caching: the underlying graph.Exec rebuilds the graph only when the
-// input tensor shapes or dtypes change. Use SetMaxCache to tune.
+// Shape caching: the underlying graph.Exec rebuilds the graph only when
+// the input tensor shapes or dtypes change, per gomlx's shapesMatch
+// comparison. v1 is Float32-only, so in practice only batch and time
+// dimensions drive cache misses. Use SetMaxCache to tune.
 //
 // Concurrency: RobustnessTrace / Robustness / Vars may be called
 // concurrently from multiple goroutines after construction. Close
@@ -88,7 +90,14 @@ func NewEvaluator(be backends.Backend, formula Formula, opts ...Option) *Evaluat
 	}
 }
 
-// SetMaxCache caps the number of distinct input-shape graphs kept compiled.
+// SetMaxCache caps the number of distinct input-shape graphs kept
+// compiled.
+//
+// The underlying gomlx cache is a HARD CAP, not an LRU: once n distinct
+// shapes have been compiled, a further distinct shape causes Exec to
+// error rather than evicting an older entry. Set n large enough to cover
+// every shape the Evaluator will see, or set n=-1 for unbounded. When
+// shapes are highly dynamic, pad traces to a fixed length instead.
 func (e *Evaluator) SetMaxCache(n int) *Evaluator {
 	e.mu.Lock()
 	defer e.mu.Unlock()
