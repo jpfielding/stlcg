@@ -27,9 +27,15 @@ func (m Mode) String() string {
 type TiePolicy int
 
 const (
-	// TieArgmax sends the full gradient to a single argmax (XLA default).
+	// TieArgmax applies the default gomlx/XLA ReduceMax/ReduceMin VJP.
+	// Empirically, this routes gradient=1 to EACH tied extremum slot;
+	// the sum of the incoming gradient vector is therefore the number
+	// of ties rather than 1. Cheapest in graph size; use TieUniform
+	// when d(extremum)/dx should sum to 1.
 	TieArgmax TiePolicy = iota
-	// TieUniform splits gradient uniformly across tied extrema.
+	// TieUniform splits gradient uniformly across tied extrema so the
+	// gradient vector sums to 1. Implemented via a stop-gradient tie
+	// mask in the exactExtremum path.
 	TieUniform
 )
 

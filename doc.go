@@ -54,7 +54,8 @@
 //
 // A TieGradient policy is orthogonal to the mode and controls how
 // gradient mass is distributed when multiple values tie for the extremum.
-// TieArgmax (the XLA default) sends full gradient to the argmax;
-// TieUniform splits it across ties. This replaces the Python `distributed`
+// TieArgmax (the gomlx/XLA default) routes gradient=1 to each tied slot,
+// so d(max)/dx sums to the number of ties; TieUniform splits it uniformly
+// so the vector sums to 1. This replaces the Python `distributed`
 // boolean with two independent knobs.
 package stlcg
