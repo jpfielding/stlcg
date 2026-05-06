@@ -60,6 +60,46 @@ func TestRobustnessE_TimeOutOfRange(t *testing.T) {
 	}
 }
 
+func TestRobustnessTraceE_IntervalExceedsTrace(t *testing.T) {
+	// Formula's interval lower bound (50) is beyond the trace length (4).
+	// Previously this panicked deep in compile.go; now the *E variant
+	// converts it to an ErrBadShape.
+	phi := Always(Gt(Var("x"), Const(0.0)), Bounds(50, 60))
+	eval := NewEvaluator(testBackend, phi)
+	defer eval.Close()
+
+	x := tensors.FromShape(shapes.Make(dtypes.Float32, 1, 4, 1))
+	defer x.FinalizeAll()
+
+	_, err := eval.RobustnessTraceE(SignalMap{"x": x})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrBadShape) {
+		t.Errorf("err = %v, want wraps ErrBadShape", err)
+	}
+}
+
+func TestWithModeRejectsInvalidEnum(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for WithMode(42), got none")
+		}
+	}()
+	_ = WithMode(Mode(42))
+}
+
+func TestWithTieGradientRejectsInvalidEnum(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for WithTieGradient(42), got none")
+		}
+	}()
+	_ = WithTieGradient(TiePolicy(42))
+}
+
 func TestPanicsOnClosedForBackwardCompat(t *testing.T) {
 	phi := Gt(Var("x"), Const(0.0))
 	eval := NewEvaluator(testBackend, phi)

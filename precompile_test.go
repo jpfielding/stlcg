@@ -1,6 +1,7 @@
 package stlcg
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
@@ -48,5 +49,22 @@ func TestPrecompileRejectsBadShapes(t *testing.T) {
 		if err := eval.Precompile(bad); err == nil {
 			t.Errorf("Precompile(%v) expected error, got nil", bad)
 		}
+	}
+}
+
+// TestPrecompileSurfacesClosedError closes the evaluator, then calls
+// Precompile and asserts the error surfaces (not panics). The prior
+// implementation called panicking RobustnessTrace and leaked tensors.
+func TestPrecompileSurfacesClosedError(t *testing.T) {
+	phi := Gt(Var("x"), Const(0.0))
+	eval := NewEvaluator(testBackend, phi)
+	eval.Close()
+
+	err := eval.Precompile([2]int{1, 4})
+	if err == nil {
+		t.Fatal("Precompile on closed evaluator: expected error, got nil")
+	}
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("Precompile on closed evaluator: expected ErrClosed, got %v", err)
 	}
 }

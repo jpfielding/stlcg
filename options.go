@@ -1,5 +1,7 @@
 package stlcg
 
+import "fmt"
+
 // Mode selects between smooth and exact min/max in Maxish/Minish reductions.
 type Mode int
 
@@ -69,11 +71,24 @@ func defaultConfig() config {
 // Option customizes an Evaluator.
 type Option func(*config)
 
-// WithMode sets the min/max evaluation mode.
-func WithMode(m Mode) Option { return func(c *config) { c.mode = m } }
+// WithMode sets the min/max evaluation mode. Panics if m is not a
+// valid Mode — caller programmer error, surfaced at option
+// construction rather than during graph compilation.
+func WithMode(m Mode) Option {
+	if m != ModeSmooth && m != ModeExact {
+		panic(fmt.Sprintf("stlcg: WithMode: invalid Mode %v; want ModeSmooth or ModeExact", int(m)))
+	}
+	return func(c *config) { c.mode = m }
+}
 
-// WithTieGradient sets the tie-gradient policy.
-func WithTieGradient(t TiePolicy) Option { return func(c *config) { c.tie = t } }
+// WithTieGradient sets the tie-gradient policy. Panics on an invalid
+// TiePolicy value — see WithMode for the rationale.
+func WithTieGradient(t TiePolicy) Option {
+	if t != TieArgmax && t != TieUniform {
+		panic(fmt.Sprintf("stlcg: WithTieGradient: invalid TiePolicy %v; want TieArgmax or TieUniform", int(t)))
+	}
+	return func(c *config) { c.tie = t }
+}
 
 // WithPScale sets the predicate-robustness scale factor. Fed as a graph
 // parameter; changing it does not trigger recompile.

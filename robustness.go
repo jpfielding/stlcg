@@ -123,16 +123,31 @@ func (e *Evaluator) Precompile(shapes ...[2]int) error {
 		if b <= 0 || tLen <= 0 {
 			return fmt.Errorf("stlcg: Precompile: invalid shape [batch=%d, time=%d]", b, tLen)
 		}
-		sig := make(SignalMap, len(e.varOrder))
-		for _, name := range e.varOrder {
-			sig[name] = zeroTraceTensor(b, tLen)
+		if err := e.precompileOne(b, tLen); err != nil {
+			return err
 		}
-		out := e.RobustnessTrace(sig)
-		out.FinalizeAll()
+	}
+	return nil
+}
+
+// precompileOne drives a single (batch, time) shape through the graph
+// and cleans up all allocated tensors even on error. Split out so the
+// deferred cleanup scope is per-shape, not per-Precompile call.
+func (e *Evaluator) precompileOne(b, tLen int) error {
+	sig := make(SignalMap, len(e.varOrder))
+	for _, name := range e.varOrder {
+		sig[name] = zeroTraceTensor(b, tLen)
+	}
+	defer func() {
 		for _, t := range sig {
 			t.FinalizeAll()
 		}
+	}()
+	out, err := e.RobustnessTraceE(sig)
+	if err != nil {
+		return fmt.Errorf("stlcg: Precompile shape [%d,%d]: %w", b, tLen, err)
 	}
+	out.FinalizeAll()
 	return nil
 }
 
@@ -174,8 +189,9 @@ func (e *Evaluator) RobustnessTrace(signals SignalMap, perCall ...Option) *tenso
 
 // RobustnessTraceE is the error-returning counterpart of RobustnessTrace.
 // Runtime errors (closed evaluator, missing signal variable, gomlx Exec
-// failure) are wrapped with the sentinel errors in errors.go.
-// Programmer invariants (unknown AST types, arity mismatches) still panic.
+// failure, interval-exceeds-trace-length) are wrapped with the sentinel
+// errors in errors.go. Programmer invariants (unknown AST types, arity
+// mismatches) still panic.
 func (e *Evaluator) RobustnessTraceE(signals SignalMap, perCall ...Option) (*tensors.Tensor, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -186,11 +202,34 @@ func (e *Evaluator) RobustnessTraceE(signals SignalMap, perCall ...Option) (*ten
 	if err != nil {
 		return nil, err
 	}
+	// Pre-flight: reject formulas whose bounded interval lower bound
+	// exceeds the runtime trace length. The compiler would otherwise
+	// panic from inside gomlx's graph-build goroutine, leaving the Exec
+	// in a state that deadlocks on Finalize. Pre-validation avoids the
+	// panic entirely.
+	if T, ok := traceLength(signals); ok {
+		if err := validateIntervalsForT(e.formula, T); err != nil {
+			return nil, err
+		}
+	}
 	out, err := e.exec.Exec1(args...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrExec, err)
 	}
 	return out, nil
+}
+
+// traceLength peeks the axis-1 size of any signal tensor. All signals
+// share the same [B, T, 1] layout. Returns ok=false if the map is empty
+// or signals lack rank 2+ (covered by the normal ErrBadShape path).
+func traceLength(signals SignalMap) (int, bool) {
+	for _, t := range signals {
+		sh := t.Shape()
+		if sh.Rank() >= 2 {
+			return sh.Dimensions[1], true
+		}
+	}
+	return 0, false
 }
 
 // Robustness returns the single-step robustness at the selected time as a
@@ -296,10 +335,12 @@ func sliceAtTimeE(trace *tensors.Tensor, t int) (*tensors.Tensor, error) {
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadShape, err)
+		out.FinalizeAll()
+		return nil, fmt.Errorf("%w: %v", ErrExec, err)
 	}
 	if loopErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadShape, loopErr)
+		out.FinalizeAll()
+		return nil, fmt.Errorf("%w: %v", ErrExec, loopErr)
 	}
 	return out, nil
 }
