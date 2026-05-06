@@ -3,6 +3,7 @@ package stlcg
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/graph"
@@ -28,16 +29,22 @@ type TimeSelector struct{ t int }
 func AtTime(t int) TimeSelector { return TimeSelector{t: t} }
 
 // Evaluator owns a compiled gomlx Exec and evaluates a fixed Formula under
-// fixed Mode/Tie/AGM/KeepDim topology. Mutable scalars (scale, pscale) are
-// fed per call as graph parameters and do not invalidate the cache.
+// fixed Mode/Tie topology. Mutable scalars (scale, pscale) are fed per call
+// as graph parameters and do not invalidate the cache.
 //
 // Shape caching: the underlying graph.Exec rebuilds the graph only when the
 // input tensor shapes or dtypes change. Use SetMaxCache to tune.
+//
+// Concurrency: RobustnessTrace / Robustness / Vars may be called
+// concurrently from multiple goroutines after construction. Close
+// serializes with in-flight evaluations — it is safe to call once, from
+// any goroutine, at shutdown. A second Close is a no-op.
 type Evaluator struct {
 	formula  Formula
 	cfg      config
 	varOrder []string
 	exec     *graph.Exec
+	mu       sync.RWMutex
 	closed   bool
 }
 
@@ -81,13 +88,18 @@ func NewEvaluator(be backends.Backend, formula Formula, opts ...Option) *Evaluat
 
 // SetMaxCache caps the number of distinct input-shape graphs kept compiled.
 func (e *Evaluator) SetMaxCache(n int) *Evaluator {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.exec.SetMaxCache(n)
 	return e
 }
 
 // Close finalizes the underlying Exec and releases backend resources.
-// Further calls to RobustnessTrace or Robustness will panic.
+// Further calls to RobustnessTrace or Robustness will panic. Close is
+// idempotent and safe to call from any goroutine.
 func (e *Evaluator) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.closed {
 		return
 	}
@@ -107,6 +119,8 @@ func (e *Evaluator) Vars() []string {
 // robustness trace of shape [B, T, 1]. Per-call options currently only
 // accept WithScale/WithPScale; other options are ignored.
 func (e *Evaluator) RobustnessTrace(signals SignalMap, perCall ...Option) *tensors.Tensor {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	if e.closed {
 		panic("stlcg: Evaluator is closed")
 	}
