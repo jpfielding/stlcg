@@ -331,7 +331,11 @@ Independent of the metric, `logger.JSONLLogger` writes one JSON record
 per scalar / histogram call. Stdlib-only, mutex-guarded:
 
 ```go
-f, _ := os.Create("run.jsonl")
+f, err := os.Create("run.jsonl")
+if err != nil {
+    log.Fatal(err)
+}
+defer f.Close()
 l := logger.NewJSONL(f)
 defer l.Close()
 
