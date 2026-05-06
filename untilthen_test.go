@@ -109,6 +109,82 @@ func TestIntegralOverPredicate(t *testing.T) {
 	runParity(t, phi, signals, cfg, 1e-5)
 }
 
+// TestUntilOverlapFalse exercises the overlap=false branch. The runParity
+// harness compares the compiled output to the reference evaluator, which
+// now honors overlap per node. We also hand-compute a simple case at t=0
+// to pin down the semantics: with overlap=false and a=0, psi[0] alone
+// satisfies the until (phi prefix is empty, so its contribution is the
+// min-identity +∞, dominated by psi).
+func TestUntilOverlapFalse(t *testing.T) {
+	x, y := Var("x"), Var("y")
+
+	// Phi is always false on this trace; psi is true at index 2.
+	// With overlap=true: Until fails because phi never holds — rho is
+	//   dominated by negative phi prefix.
+	// With overlap=false: at t=2 psi[2]=+3, phi prefix is empty (identity
+	//   is +∞ for min), so inner_k=min(+∞, +3)=3 → positive robustness.
+	signals := map[string][]float64{
+		"x": {-1, -1, -1, -1, -1}, // phi = (x > 0) always false
+		"y": {-1, -1, 3, -1, -1},  // psi = (y > 0) true at t=2
+	}
+	cfg := config{mode: ModeExact, pscale: 1.0, scale: 0}
+
+	phiOverlapFalse := Until(Gt(x, Const(0.0)), Gt(y, Const(0.0)), Bounds(0, 4), false)
+	phiOverlapTrue := Until(Gt(x, Const(0.0)), Gt(y, Const(0.0)), Bounds(0, 4), true)
+
+	t.Run("overlap=false matches reference", func(t *testing.T) {
+		runParity(t, phiOverlapFalse, signals, cfg, 1e-5)
+	})
+	t.Run("overlap=true matches reference", func(t *testing.T) {
+		runParity(t, phiOverlapTrue, signals, cfg, 1e-5)
+	})
+
+	// Values must differ: overlap=false yields positive rho somewhere;
+	// overlap=true stays negative everywhere.
+	evalF := NewEvaluator(testBackend, phiOverlapFalse, WithMode(ModeExact), WithScale(0))
+	defer evalF.Close()
+	evalT := NewEvaluator(testBackend, phiOverlapTrue, WithMode(ModeExact), WithScale(0))
+	defer evalT.Close()
+
+	sigMap := make(SignalMap, 2)
+	for k, v := range signals {
+		sigMap[k] = tensorFromRow(v)
+	}
+	defer func() {
+		for _, v := range sigMap {
+			v.FinalizeAll()
+		}
+	}()
+
+	tF := evalF.RobustnessTrace(sigMap)
+	tT := evalT.RobustnessTrace(sigMap)
+	defer tF.FinalizeAll()
+	defer tT.FinalizeAll()
+
+	rowF := tensorRow(tF)
+	rowT := tensorRow(tT)
+
+	// overlap=false should reach positive robustness somewhere in the trace
+	// (the reachable psi dominates the empty phi-prefix).
+	positiveF := false
+	for _, v := range rowF {
+		if v > 0 {
+			positiveF = true
+			break
+		}
+	}
+	if !positiveF {
+		t.Errorf("overlap=false should reach positive rho; got %v", rowF)
+	}
+
+	// overlap=true must never reach positive robustness (phi never holds).
+	for i, v := range rowT {
+		if v > 0 {
+			t.Errorf("overlap=true rho[%d] = %g should be <= 0 (phi never holds)", i, v)
+		}
+	}
+}
+
 func TestComposedAlwaysUntil(t *testing.T) {
 	x, y := Var("x"), Var("y")
 	signals := map[string][]float64{

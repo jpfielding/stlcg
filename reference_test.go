@@ -61,9 +61,9 @@ func (r *referenceEvaluator) rho(f Formula, signals map[string][]float64) []floa
 	case *eventuallyFormula:
 		return r.slidingReduce(r.rho(n.sub, signals), n.interval, true)
 	case *untilFormula:
-		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, false)
+		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, false, n.overlap)
 	case *thenFormula:
-		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, true)
+		return r.untilOrThen(r.rho(n.left, signals), r.rho(n.right, signals), n.interval, true, n.overlap)
 	case *integralFormula:
 		return r.integral(r.rho(n.sub, signals), n.interval, n.scheme)
 	}
@@ -72,10 +72,11 @@ func (r *referenceEvaluator) rho(f Formula, signals map[string][]float64) []floa
 
 // untilOrThen implements the reference semantics that mirrors the
 // compiler: at each t, for each offset k ∈ [0, L-1] build inner_k =
-// min(prefix_{t..t+a+k} phi, psi[t+a+k]) with past-end slots replaced by
-// the psi-side sentinel (-∞), and take the max (or smooth max) across k.
+// min(prefix phi, psi[t+a+k]) with past-end slots replaced by the
+// psi-side sentinel (-∞), and take the max (or smooth max) across k.
 // phiPrefixMax=true yields Then semantics; false yields Until.
-func (r *referenceEvaluator) untilOrThen(phi, psi []float64, iv Interval, phiPrefixMax bool) []float64 {
+// overlap=true includes s in the phi prefix; overlap=false uses [t, s-1].
+func (r *referenceEvaluator) untilOrThen(phi, psi []float64, iv Interval, phiPrefixMax, overlap bool) []float64 {
 	T := len(phi)
 	a := iv.Lo
 	var b int
@@ -92,6 +93,12 @@ func (r *referenceEvaluator) untilOrThen(phi, psi []float64, iv Interval, phiPre
 		panic(fmt.Sprintf("ref: Until/Then empty interval lo=%d hi=%d T=%d", iv.Lo, iv.Hi, T))
 	}
 
+	// Identity element for the empty prefix case (overlap=false, s=t).
+	emptyPrefix := math.Inf(+1) // min identity (Until)
+	if phiPrefixMax {
+		emptyPrefix = math.Inf(-1) // max identity (Then)
+	}
+
 	out := make([]float64, T)
 	for t := 0; t < T; t++ {
 		inner := make([]float64, L)
@@ -101,10 +108,19 @@ func (r *referenceEvaluator) untilOrThen(phi, psi []float64, iv Interval, phiPre
 				inner[k] = math.Inf(-1)
 				continue
 			}
-			// phi prefix over [t, s] inclusive.
-			win := make([]float64, s-t+1)
-			copy(win, phi[t:s+1])
-			phiPfx := r.reduceWindow(win, phiPrefixMax)
+			// phi prefix: [t, s] if overlap, else [t, s-1].
+			end := s
+			if !overlap {
+				end = s - 1
+			}
+			var phiPfx float64
+			if end < t {
+				phiPfx = emptyPrefix
+			} else {
+				win := make([]float64, end-t+1)
+				copy(win, phi[t:end+1])
+				phiPfx = r.reduceWindow(win, phiPrefixMax)
+			}
 
 			// Pairwise min with psi[s].
 			inner[k] = r.reducePairScalar(phiPfx, psi[s], false)

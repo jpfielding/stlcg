@@ -257,25 +257,27 @@ func (c *compiler) slidingReduce(sub *graph.Node, iv Interval, wantMax bool) *gr
 // compileUntilThen lowers (phi U_iv psi) or (phi T_iv psi) into a
 // [B, T, 1] robustness-trace node.
 //
-// Semantics (forward time; conventional STL, overlap=true):
+// Semantics (forward time; conventional STL):
 //
 //	until[t] = max_{s ∈ [t+a, t+b] ∩ [0, T-1]}
 //	               min( prefix_{t..s} phi,   psi[s] )
 //
-// For Until, prefix_{t..s} phi = min over u ∈ [t, s] of phi[u].
-// For Then,  prefix_{t..s} phi = max over u ∈ [t, s] of phi[u].
+// For Until, prefix_{t..s} phi = min over u of phi[u].
+// For Then,  prefix_{t..s} phi = max over u of phi[u].
+//
+// The "overlap" parameter controls whether phi's prefix includes the
+// matching time s:
+//   - overlap=true  (conventional "strong until"): u ∈ [t, s].
+//     phi is required to hold at s as well as earlier.
+//   - overlap=false                                : u ∈ [t, s-1].
+//     phi is only required before s; psi holding at t=s is sufficient
+//     (the phi-prefix becomes the identity element of min/max).
 //
 // Implementation: for each offset k ∈ [0, L-1] (L = b-a+1), compute
-// phi_pfx_k[t] = (prefix over phi of length a+k+1 starting at t) using
-// slidingReduce, and psi_shift_k[t] = psi[t+a+k] (with -∞ sentinel past
-// the trace end). The inner combine is a pairwise Minish, and the outer
-// reduction over k is a batched Maxish.
-//
-// The "overlap" flag is accepted for API compatibility with Python stlcg;
-// both values currently produce the overlap=true semantics above.
+// phi_pfx_k[t] = (prefix over phi of length a+k+1 [overlap] or a+k
+// [no overlap]), and psi_shift_k[t] = psi[t+a+k]. The inner combine is
+// a pairwise Minish, and the outer reduction over k is a batched Maxish.
 func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, phiPrefixMax bool) *graph.Node {
-	_ = overlap
-
 	phi := c.compileFormula(left)
 	psi := c.compileFormula(right)
 
@@ -306,10 +308,31 @@ func (c *compiler) compileUntilThen(left, right Formula, iv Interval, overlap, p
 	psiFill := graph.Infinity(phi.Graph(), shape.DType, -1)
 	psiPad := padTimeAxisRight(psi, psiFill, a+L-1)
 
+	// Empty-prefix sentinel for overlap=false at k=0, a=0: identity of the
+	// prefix reduction. +∞ for Until (min), -∞ for Then (max).
+	emptySign := +1
+	if phiPrefixMax {
+		emptySign = -1
+	}
+	emptyFill := graph.Infinity(phi.Graph(), shape.DType, emptySign)
+	emptyPrefix := graph.BroadcastToShape(emptyFill, shape)
+
 	inner := make([]*graph.Node, L)
 	for k := 0; k < L; k++ {
-		// phi prefix over window [t, t+a+k] — length a+k+1 starting at 0.
-		phiPfx := c.slidingReduce(phi, Bounds(0, a+k), phiPrefixMax)
+		// phi prefix window upper index (inclusive offset from t).
+		// overlap=true:  [t, t+a+k]    -> upper = a+k
+		// overlap=false: [t, t+a+k-1]  -> upper = a+k-1 (empty if <0)
+		upper := a + k
+		if !overlap {
+			upper = a + k - 1
+		}
+
+		var phiPfx *graph.Node
+		if upper < 0 {
+			phiPfx = emptyPrefix
+		} else {
+			phiPfx = c.slidingReduce(phi, Bounds(0, upper), phiPrefixMax)
+		}
 
 		// psi shifted by (a+k).
 		axesSpec := make([]graph.SliceAxisSpec, rank)
