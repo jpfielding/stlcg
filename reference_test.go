@@ -206,10 +206,6 @@ func (r *referenceEvaluator) slidingReduce(sub []float64, iv Interval, wantMax b
 	out := make([]float64, T)
 	for t := 0; t < T; t++ {
 		lo := t + a
-		hi := t + b
-		if hi > T-1 {
-			hi = T - 1
-		}
 		// Collect window values with sentinel padding so the window length
 		// is constant across t (matches compiler's padded reshape-and-reduce).
 		L := b - a + 1
