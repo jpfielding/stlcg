@@ -1,5 +1,7 @@
 # stlcg.go
 
+[![CI](https://github.com/jpfielding/stlcg/actions/workflows/ci.yml/badge.svg)](https://github.com/jpfielding/stlcg/actions/workflows/ci.yml)
+
 **Signal Temporal Logic robustness on a differentiable computation graph, in Go.**
 
 A transliteration of [stanfordASL/stlcg](https://github.com/stanfordASL/stlcg)
